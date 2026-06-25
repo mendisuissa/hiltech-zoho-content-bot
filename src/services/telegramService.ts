@@ -261,32 +261,42 @@ function previewControlsMessage(): string {
   ].join('\n');
 }
 
-function detailedPreviewMessage(approval: ApprovalRequest): string {
+async function sourceForApproval(approval: ApprovalRequest): Promise<SourceItem | null> {
+  return prisma.sourceItem.findUnique({ where: { id: approval.sourceItemId } });
+}
+
+function visualCard(title: string, body: string): string {
+  return [
+    `<b>╭─ ${escapeHtml(title)}</b>`,
+    body,
+    '<b>╰────────────────</b>',
+  ].join('\n');
+}
+
+function detailedChannelCards(approval: ApprovalRequest, item: SourceItem | null): string[] {
   const article = (approval.articleDraft ?? {}) as { title?: string; excerpt?: string; metaDescription?: string; bodyHtml?: string; editorNotes?: string };
   const facebookPage = (approval.facebookPageDraft ?? {}) as { postText?: string };
   const facebookGroup = (approval.facebookGroupDraft ?? {}) as { postText?: string };
   const whatsapp = (approval.whatsappDraft ?? {}) as { messageText?: string };
-
+  const footer = sourceFooter(item?.canonicalUrl ?? approval.sourceUrl, item?.publishedAt);
   return [
-    '<b>📋 פרטי חבילת התוכן</b>',
-    '',
-    '<b>📝 מאמר לאתר</b>',
-    `<b>${escapeHtml(article.title ?? approval.title)}</b>`,
-    escapeHtml(truncate(article.excerpt || article.metaDescription || htmlToText(article.bodyHtml ?? ''), 950)),
-    '',
-    '<b>📣 Facebook Page</b>',
-    escapeHtml(truncate(facebookPage.postText ?? '', 700)),
-    '',
-    '<b>👥 קבוצת Facebook Zoho</b>',
-    escapeHtml(truncate(facebookGroup.postText ?? '', 760)),
-    '',
-    '<b>💬 WhatsApp</b>',
-    escapeHtml(truncate(whatsapp.messageText ?? '', 500)),
-    article.editorNotes && article.editorNotes !== 'אין' ? `\n<b>בדיקה לפני פרסום:</b> ${escapeHtml(article.editorNotes)}` : '',
-  ].filter(Boolean).join('\n');
+    visualCard('📝 מאמר לאתר', [
+      `<b>${escapeHtml(article.title ?? approval.title)}</b>`,
+      escapeHtml(truncate(article.excerpt || article.metaDescription || htmlToText(article.bodyHtml ?? ''), 900)),
+      article.editorNotes && article.editorNotes !== 'אין' ? `<i>בדיקה לפני פרסום:</i> ${escapeHtml(article.editorNotes)}` : '',
+      footer,
+    ].filter(Boolean).join('\n\n')),
+    visualCard('📣 Facebook Page', [escapeHtml(truncate(facebookPage.postText ?? '', 900)), footer].filter(Boolean).join('\n\n')),
+    visualCard('👥 קבוצת Facebook Zoho', [escapeHtml(truncate(facebookGroup.postText ?? '', 900)), footer].filter(Boolean).join('\n\n')),
+    visualCard('💬 WhatsApp', [escapeHtml(truncate(whatsapp.messageText ?? '', 700)), footer].filter(Boolean).join('\n\n')),
+  ];
 }
 
 export async function sendApprovalNotification(approval: ApprovalRequest, item: SourceItem): Promise<void> {
+  if (!item.publishedAt || item.publishedAt.getUTCFullYear() < 2026) {
+    logger.info('Blocked undated or pre-2026 approval notification', { approvalId: approval.id, publishedAt: item.publishedAt?.toISOString() ?? null });
+    return;
+  }
   const messageId = await sendMessage(approvalBrief(approval, item), actionKeyboard(approval.id));
   if (messageId) {
     await import('../db/prisma').then(({ prisma }) => prisma.approvalRequest.update({
@@ -298,15 +308,32 @@ export async function sendApprovalNotification(approval: ApprovalRequest, item: 
 }
 
 export async function sendApprovalPreview(approval: ApprovalRequest): Promise<void> {
-  // Keep the long review content separate from its controls: Telegram preserves the
-  // action bar as the final, uncluttered message even after a rewrite has produced a lot of text.
-  await sendMessage(previewMessage(approval));
+  const item = await sourceForApproval(approval);
+  if (!item?.publishedAt || item.publishedAt.getUTCFullYear() < 2026) {
+    await sendMessage('⚠️ לא ניתן להציג חבילה זו: למקור אין תאריך רשמי מאומת מ־2026 ומעלה.');
+    return;
+  }
+  await sendMessage(visualCard('👀 סיכום חבילת הבדיקה', [
+    previewMessage(approval),
+    sourceFooter(item.canonicalUrl, item.publishedAt),
+  ].join('\n\n')));
   await sendMessage(previewControlsMessage(), actionKeyboard(approval.id));
   logger.info('Telegram preview and review controls sent', { approvalId: approval.id });
 }
 
 export async function sendDetailedApprovalPreview(approval: ApprovalRequest): Promise<void> {
-  await sendMessage(detailedPreviewMessage(approval));
+  const item = await sourceForApproval(approval);
+  if (!item?.publishedAt || item.publishedAt.getUTCFullYear() < 2026) {
+    await sendMessage('⚠️ לא ניתן להציג חבילה זו: למקור אין תאריך רשמי מאומת מ־2026 ומעלה.');
+    return;
+  }
+  await sendMessage(visualCard('📋 פרטי חבילת התוכן', [
+    '<b>כל ערוץ מופיע בהודעה נפרדת כדי שיהיה נוח לקרוא, להעתיק ולבדוק.</b>',
+    sourceFooter(item.canonicalUrl, item.publishedAt),
+  ].join('\n\n')));
+  for (const card of detailedChannelCards(approval, item)) {
+    await sendMessage(card);
+  }
   await sendMessage(previewControlsMessage(), actionKeyboard(approval.id));
   logger.info('Telegram detailed preview and review controls sent', { approvalId: approval.id });
 }
@@ -404,9 +431,12 @@ export async function generateAndSendCoverImage(approval: ApprovalRequest): Prom
   if (!b64) throw new Error('OpenAI did not return a cover image');
   const form = new FormData();
   const imageBuffer = Buffer.from(b64, 'base64');
+  // The background comes from the image model; the exact HilTech logo is overlaid locally.
+  const brandedImage = await applyHilTechBranding(imageBuffer);
   form.append('chat_id', String(env.TELEGRAM_APPROVER_CHAT_ID));
-  form.append('photo', new Blob([imageBuffer], { type: 'image/png' }), 'hiltech-zoho-cover.png');
-  form.append('caption', `🖼 תמונת קאבר מוצעת\n${cover.altText ?? approval.title}`);
+  form.append('photo', new Blob([new Uint8Array(brandedImage)], { type: 'image/png' }), 'hiltech-branded-cover.png');
+  form.append('caption', `<b>🖼 קאבר HilTech מוכן לבדיקה</b>\n${escapeHtml(cover.altText ?? approval.title)}\n<i>הלוגו של HilTech שולב בפינה העליונה.</i>`);
+  form.append('parse_mode', 'HTML');
   const response = await fetch(telegramEndpoint('sendPhoto'), { method: 'POST', body: form });
   const payload = await response.json() as { ok?: boolean; description?: string };
   if (!response.ok || !payload.ok) throw new Error(`Telegram sendPhoto failed: ${payload.description ?? response.statusText}`);

@@ -47,7 +47,10 @@ approvalsRouter.post('/resend-pending', async (req, res, next) => {
     const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 25) : 12;
 
     const pending = await prisma.approvalRequest.findMany({
-      where: { status: 'pending' },
+      where: {
+        status: 'pending',
+        sourceItem: { publishedAt: { gte: new Date('2026-01-01T00:00:00.000Z') } },
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
       include: { sourceItem: true },

@@ -14,6 +14,9 @@ export async function regeneratePendingApproval(approvalId: string) {
   if (!approval) return null;
 
   const { sourceItem } = approval;
+  if (!sourceItem.publishedAt || sourceItem.publishedAt.getUTCFullYear() < 2026) {
+    throw new Error('Cannot regenerate an approval without an official verified 2026+ publication date');
+  }
   const source = sourceItem.sourceConfig;
   const editorialBrief = normalizeEditorialBrief(
     await createEditorialBrief(source, sourceItem),
