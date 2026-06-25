@@ -175,10 +175,85 @@ async function parseCandidatePage(url: string, fallbackTitle: string, fallbackPu
   };
 }
 
+function parseMonthYearNearText(value: string): Date | null {
+  const normalized = normalizeWhitespace(value);
+  const monthYear = normalized.match(
+    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i,
+  );
+  if (monthYear) return parseOfficialDate(`${monthYear[1]} 1, ${monthYear[2]}`);
+  const yearMonth = normalized.match(
+    /\b(20\d{2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\b/i,
+  );
+  if (yearMonth) return parseOfficialDate(`${yearMonth[2]} 1, ${yearMonth[1]}`);
+  return parseOfficialDate(normalized);
+}
+
+function isOfficialUpdateLink(source: SourceConfig, absolute: URL): boolean {
+  const path = absolute.pathname.toLowerCase();
+  // Keep the source-specific scope deliberately tight. This prevents the generic
+  // navigation/footer/blog archive links from becoming "updates".
+  if (source.product === 'projects') {
+    return (
+      path.startsWith('/projects/') ||
+      path.startsWith('/blog/projects/')
+    ) && !/projects\d+\.html$/.test(path);
+  }
+  if (source.product === 'crm') {
+    return path.startsWith('/crm/') || path.startsWith('/crm/whats-new/');
+  }
+  return path.startsWith('/desk/') || path.startsWith('/desk/release-notes/');
+}
+
+function nearestTimelineDate($: cheerio.CheerioAPI, anchor: Element): Date | null {
+  // Zoho What’s New pages frequently render a timeline with the year/month
+  // outside the individual update card. Walk backwards through meaningful
+  // ancestors and siblings so "May 2026" is inherited by the cards below it.
+  let cursor = $(anchor);
+  for (let level = 0; level < 7; level += 1) {
+    const container = cursor.parent();
+    if (!container.length) break;
+
+    const ownText = normalizeWhitespace(container.clone().children('h1,h2,h3,h4,h5,h6,time,.date,.month,.year').text());
+    const ownDate = parseMonthYearNearText(ownText);
+    if (ownDate) return ownDate;
+
+    const previous = container.prevAll().slice(0, 12);
+    for (const sibling of previous.toArray()) {
+      const siblingText = normalizeWhitespace($(sibling).text());
+      const candidate = parseMonthYearNearText(siblingText);
+      if (candidate) return candidate;
+    }
+
+    // Some layouts keep a date heading as the first child of a wrapper. Search
+    // only direct headings/labels here, not every link in the page.
+    const directLabels = container.children('h1,h2,h3,h4,h5,h6,time,.date,.month,.year');
+    for (const label of directLabels.toArray()) {
+      const candidate = parseMonthYearNearText($(label).text());
+      if (candidate) return candidate;
+    }
+
+    cursor = container;
+  }
+  return null;
+}
+
 function extractCardDate($: cheerio.CheerioAPI, element: Element): Date | null {
-  const card = $(element).closest('article, li, .blog-card, .post, .card, .item, div').first();
-  const text = normalizeWhitespace(card.text());
-  return parseOfficialDate(text);
+  const card = $(element).closest('article, li, .blog-card, .post, .card, .item, [class*="update"], [class*="release"]').first();
+  const cardText = normalizeWhitespace(card.text());
+  return parseMonthYearNearText(cardText) ?? nearestTimelineDate($, element);
+}
+
+function isLikelyUpdateAnchor($: cheerio.CheerioAPI, element: Element): boolean {
+  const text = normalizeWhitespace($(element).text());
+  const href = $(element).attr('href') ?? '';
+  if (text.length < 8 || text.length > 260) return false;
+  if (/^(read more|learn more|click here|view all)$/i.test(text)) return false;
+  if (/login|signup|pricing|support|contact|help|terms|privacy/i.test(href)) return false;
+  // The current update cards normally live in an update/timeline/release area.
+  // We still allow a dated card even when its class naming changes.
+  const context = normalizeWhitespace($(element).closest('article, li, section, div').attr('class') ?? '');
+  const dated = Boolean(extractCardDate($, element));
+  return dated || /update|release|timeline|what.?s.?new|news|feature/i.test(context);
 }
 
 async function collectCandidatesFromSource(source: SourceConfig): Promise<CandidateLink[]> {
@@ -188,37 +263,48 @@ async function collectCandidatesFromSource(source: SourceConfig): Promise<Candid
   const candidates: CandidateLink[] = [];
 
   $('a[href]').each((_, element) => {
+    if (!isLikelyUpdateAnchor($, element)) return;
     const href = $(element).attr('href');
     if (!href) return;
+
     let absolute: URL;
-    try { absolute = new URL(href, source.url); } catch { return; }
+    try {
+      absolute = new URL(href, source.url);
+    } catch {
+      return;
+    }
+
     if (!['www.zoho.com', 'zoho.com'].includes(absolute.hostname.toLowerCase())) return;
-    const path = absolute.pathname.toLowerCase();
-    if (!path.includes(`/${source.product === 'projects' ? 'projects' : source.product}/`)) return;
-    if (/login|signup|pricing|support|contact|help|terms|privacy/i.test(absolute.toString())) return;
+    if (!isOfficialUpdateLink(source, absolute)) return;
+
     const normalized = normalizeCanonicalUrl(absolute.toString());
-    if (seen.has(normalized)) return;
-    const text = normalizeWhitespace($(element).text());
-    if (text.length < 8) return;
+    if (normalized === normalizeCanonicalUrl(source.url) || seen.has(normalized)) return;
+
+    const title = normalizeWhitespace($(element).text());
+    const publishedAt = extractCardDate($, element);
     seen.add(normalized);
-    candidates.push({ title: text.slice(0, 220), url: normalized, publishedAt: extractCardDate($, element) });
+    candidates.push({ title: title.slice(0, 220), url: normalized, publishedAt });
   });
 
-  if (candidates.length === 0) {
-    const fallbackTitle = pickText($, ['meta[property="og:title"]', 'title', 'h1']) || source.name;
-    candidates.push({
-      title: normalizeWhitespace(fallbackTitle),
-      url: normalizeCanonicalUrl(source.url),
-      publishedAt: extractPublishedAt($),
-    });
-  }
+  const eligible = candidates
+    .filter((candidate) => (candidate.publishedAt?.getUTCFullYear() ?? 0) >= 2026)
+    .sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
 
-  // Prefer cards that include an explicit 2026+ date and process recent entries first.
-  return candidates
-    .sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0))
-    .slice(0, 35);
+  logger.info('Zoho source timeline candidates resolved', {
+    source: source.name,
+    collected: candidates.length,
+    eligible2026: eligible.length,
+    samples: eligible.slice(0, 5).map((item) => ({
+      title: item.title,
+      date: item.publishedAt?.toISOString() ?? null,
+      url: item.url,
+    })),
+  });
+
+  // Do not fall back to generic archive links: a source without dated 2026
+  // cards should simply produce no candidates rather than old blog content.
+  return eligible.slice(0, 25);
 }
-
 
 async function processCandidate(
   source: SourceConfig,
