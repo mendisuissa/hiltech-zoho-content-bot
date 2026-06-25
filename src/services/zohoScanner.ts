@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import type {
   ApprovalRequest,
   ContentAudience,
@@ -174,7 +175,7 @@ async function parseCandidatePage(url: string, fallbackTitle: string, fallbackPu
   };
 }
 
-function extractCardDate($: cheerio.CheerioAPI, element: cheerio.Element): Date | null {
+function extractCardDate($: cheerio.CheerioAPI, element: Element): Date | null {
   const card = $(element).closest('article, li, .blog-card, .post, .card, .item, div').first();
   const text = normalizeWhitespace(card.text());
   return parseOfficialDate(text);
