@@ -177,6 +177,18 @@ async function processCandidate(
   skipped: boolean;
 }> {
   const parsed = await parseCandidatePage(candidate.url, candidate.title);
+  // HilTech publishes only current Zoho updates. A date must be present in the
+  // official source and it must be from 2026 onward; undated pages are not sent
+  // for approval because their recency cannot be verified.
+  const publicationYear = parsed.publishedAt?.getUTCFullYear();
+  if (!publicationYear || publicationYear < 2026) {
+    logger.info('Skipping non-current or undated Zoho item', {
+      url: parsed.canonicalUrl,
+      publishedAt: parsed.publishedAt?.toISOString() ?? null,
+    });
+    return { skipped: true, createdApproval: false };
+  }
+
   const relevance = scoreZohoItem({
     title: parsed.title,
     summary: parsed.summary,

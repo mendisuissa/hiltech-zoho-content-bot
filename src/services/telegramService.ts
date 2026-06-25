@@ -4,6 +4,7 @@ import type { ApprovalRequest, SourceItem } from '@prisma/client';
 import { env, requireEnv } from '../config/env';
 import { logger } from '../utils/logger';
 import { applyHilTechBranding } from './brandCoverService';
+import { prisma } from '../db/prisma';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -56,6 +57,23 @@ function audienceLabel(value: string): string {
     business_owners: 'בעלי עסקים',
     implementers_consultants: 'מיישמים ויועצים',
   } as Record<string, string>)[value] ?? value;
+}
+
+function formatHebrewDate(value?: Date | null): string {
+  if (!value) return 'תאריך הפרסום לא צוין במקור הרשמי';
+  return new Intl.DateTimeFormat('he-IL', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }).format(value);
+}
+
+function sourceFooter(sourceUrl: string | undefined, publishedAt?: Date | null): string {
+  const sourceLine = sourceUrl
+    ? `<a href="${escapeHtml(sourceUrl)}">פתיחת המקור הרשמי של Zoho</a>`
+    : 'מקור רשמי של Zoho לא זמין';
+  return [
+    '',
+    '────────────',
+    `<b>📅 תאריך החידוש:</b> ${escapeHtml(formatHebrewDate(publishedAt))}`,
+    `<b>🔗 מקור:</b> ${sourceLine}`,
+  ].join('\n');
 }
 
 function getTelegramConfig() {
@@ -195,6 +213,7 @@ function approvalBrief(approval: ApprovalRequest, item: SourceItem): string {
     '❌ דחייה – לסגור את העדכון הזה',
     '',
     `<i>כותרת המקור:</i> ${escapeHtml(sourceTitle)}`,
+    `<b>📅 תאריך החידוש:</b> ${escapeHtml(formatHebrewDate(item.publishedAt))}`,
     `<a href="${escapeHtml(item.canonicalUrl)}">פתיחת המקור הרשמי של Zoho</a>`,
   ].join('\n');
 }
@@ -318,6 +337,12 @@ export async function sendApprovedContentPack(approval: ApprovalRequest): Promis
   const facebookPage = (approval.facebookPageDraft ?? {}) as { postText?: string; cta?: string; sourceUrl?: string };
   const facebookGroup = (approval.facebookGroupDraft ?? {}) as { postText?: string; sourceUrl?: string };
   const whatsapp = (approval.whatsappDraft ?? {}) as { messageText?: string; sourceUrl?: string };
+  const sourceItem = await prisma.sourceItem.findUnique({
+    where: { id: approval.sourceItemId },
+    select: { canonicalUrl: true, publishedAt: true },
+  });
+  const officialUrl = sourceItem?.canonicalUrl ?? article.sourceUrl ?? facebookPage.sourceUrl ?? facebookGroup.sourceUrl ?? whatsapp.sourceUrl;
+  const footer = sourceFooter(officialUrl, sourceItem?.publishedAt);
 
   const articleText = [
     '<b>📝 מאמר לאתר – מוכן להעתקה</b>',
@@ -328,26 +353,26 @@ export async function sendApprovedContentPack(approval: ApprovalRequest): Promis
     '',
     escapeHtml(htmlToText(article.bodyHtml ?? '')),
     article.editorNotes && article.editorNotes !== 'אין' ? `\n<b>בדיקה לפני פרסום:</b> ${escapeHtml(article.editorNotes)}` : '',
-    article.sourceUrl ? `\n<b>מקור רשמי:</b> <a href="${escapeHtml(article.sourceUrl)}">Zoho</a>` : '',
+    footer,
   ].filter(Boolean).join('\n');
 
   const pageText = [
     '<b>📣 Facebook Page – מוכן להעתקה</b>', '',
     escapeHtml(facebookPage.postText ?? ''),
     facebookPage.cta ? `\n${escapeHtml(facebookPage.cta)}` : '',
-    facebookPage.sourceUrl ? `\n<i>מקור פנימי:</i> <a href="${escapeHtml(facebookPage.sourceUrl)}">Zoho</a>` : '',
+    footer,
   ].filter(Boolean).join('\n');
 
   const groupText = [
     '<b>👥 Facebook Group – מוכן להעתקה</b>', '',
     escapeHtml(facebookGroup.postText ?? ''),
-    facebookGroup.sourceUrl ? `\n<i>מקור רשמי:</i> <a href="${escapeHtml(facebookGroup.sourceUrl)}">Zoho</a>` : '',
+    footer,
   ].filter(Boolean).join('\n');
 
   const whatsappText = [
     '<b>💬 WhatsApp – מוכן להעתקה</b>', '',
     escapeHtml(whatsapp.messageText ?? ''),
-    whatsapp.sourceUrl ? `\n<i>מקור לשיתוף לפי צורך:</i> <a href="${escapeHtml(whatsapp.sourceUrl)}">Zoho</a>` : '',
+    footer,
   ].filter(Boolean).join('\n');
 
   const messages = [articleText, pageText, groupText, whatsappText];

@@ -120,3 +120,9 @@ Generated cover backgrounds are intentionally created without text or logos. The
 
 ## v2.5 Telegram review flow
 Every preview and regenerated package ends with a dedicated action panel: show package, rewrite, approve/send, reject, and create cover. This keeps review controls visible even when the content is long.
+
+
+## v2.6 — Current updates, source footers and stronger hooks
+- Only official Zoho items with a verifiable publication date in 2026 or later may create an approval.
+- Every delivered content item now ends with a separate Hebrew source footer containing the update date and official Zoho link.
+- Article and social prompts require an engaging, professional hook without clickbait or unsupported claims.

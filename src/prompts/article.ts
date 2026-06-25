@@ -19,7 +19,7 @@ export function buildArticlePrompt(input: ArticlePromptInput): string {
 
   return [
     'את/ה עורך/ת התוכן של HilTech, מומחית Zoho ישראלית. כתבו בעברית טבעית בלבד.',
-    'כתבו מאמר עדכונים מקצועי בעברית על שינוי Zoho יחיד. המטרה היא להסביר מה חדש ומה נוסף, לא לשווק את המוצר ולא לתרגם release notes מילה במילה.',
+    'כתבו מאמר עדכונים מקצועי בעברית על שינוי Zoho יחיד. המטרה היא להסביר מה חדש ומה נוסף, לא לשווק את המוצר ולא לתרגם release notes מילה במילה. הפתיחה חייבת להיות הוק חזק, מסקרן ומקצועי שמושך לקרוא, אך בלי קליקבייט, דרמה או הבטחות שלא נתמכות במקור.',
     HILTECH_STYLE_DNA,
     audienceInstruction,
     hiltechArticleStructure(input.audience),
