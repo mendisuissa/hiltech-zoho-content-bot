@@ -39,6 +39,8 @@ type ParsedCandidate = {
 type CandidateLink = {
   title: string;
   url: string;
+  summary?: string;
+  bodyText?: string;
   publishedAt?: Date | null;
 };
 
@@ -156,13 +158,22 @@ async function fetchPage(url: string): Promise<string> {
   return response.data as string;
 }
 
-async function parseCandidatePage(url: string, fallbackTitle: string, fallbackPublishedAt?: Date | null): Promise<ParsedCandidate> {
+async function parseCandidatePage(
+  url: string,
+  fallbackTitle: string,
+  fallbackPublishedAt?: Date | null,
+  fallbackSummary?: string,
+  fallbackBodyText?: string,
+): Promise<ParsedCandidate> {
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
-  const title = pickText($, ['meta[property="og:title"]', 'title', 'h1']) || fallbackTitle || url;
+  const pageTitle = pickText($, ['meta[property="og:title"]', 'title', 'h1']);
+  const title = fallbackTitle || pageTitle || url;
   const canonicalUrl = extractCanonicalUrl($, url);
-  const bodyText = collectBodyText($);
+  const pageBodyText = collectBodyText($);
+  const bodyText = normalizeWhitespace([fallbackBodyText, pageBodyText].filter(Boolean).join(' '));
   const summary =
+    fallbackSummary ||
     pickText($, ['meta[name="description"]', 'meta[property="og:description"]']) ||
     bodyText.slice(0, 320) ||
     fallbackTitle;
@@ -188,19 +199,27 @@ function parseMonthYearNearText(value: string): Date | null {
   return parseOfficialDate(normalized);
 }
 
+function isOfficialZohoHost(hostname: string): boolean {
+  return ['www.zoho.com', 'zoho.com', 'help.zoho.com', 'blog.zoho.com'].includes(hostname.toLowerCase());
+}
+
 function isOfficialUpdateLink(source: SourceConfig, absolute: URL): boolean {
+  const hostname = absolute.hostname.toLowerCase();
   const path = absolute.pathname.toLowerCase();
-  // Keep the source-specific scope deliberately tight. This prevents the generic
-  // navigation/footer/blog archive links from becoming "updates".
+
+  // The current Zoho Projects What’s New page stores the update title and date
+  // on the timeline page, while the official Read More links often point to
+  // help.zoho.com. Treat those Help articles as official source links.
   if (source.product === 'projects') {
-    return (
-      path.startsWith('/projects/') ||
-      path.startsWith('/blog/projects/')
-    ) && !/projects\d+\.html$/.test(path);
+    if (hostname === 'help.zoho.com') return path.includes('/portal/');
+    if (hostname === 'blog.zoho.com') return path.includes('projects') || path.includes('project');
+    return (path.startsWith('/projects/') || path.startsWith('/blog/projects/')) && !/projects\d+\.html$/.test(path);
   }
   if (source.product === 'crm') {
+    if (hostname === 'help.zoho.com') return path.includes('/portal/');
     return path.startsWith('/crm/') || path.startsWith('/crm/whats-new/');
   }
+  if (hostname === 'help.zoho.com') return path.includes('/portal/');
   return path.startsWith('/desk/') || path.startsWith('/desk/release-notes/');
 }
 
@@ -256,8 +275,204 @@ function isLikelyUpdateAnchor($: cheerio.CheerioAPI, element: Element): boolean 
   return dated || /update|release|timeline|what.?s.?new|news|feature/i.test(context);
 }
 
+
+const MONTHS: Record<string, number> = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11,
+  jan: 0,
+  feb: 1,
+  mar: 2,
+  apr: 3,
+  jun: 5,
+  jul: 6,
+  aug: 7,
+  sep: 8,
+  sept: 8,
+  oct: 9,
+  nov: 10,
+  dec: 11,
+};
+
+function monthIndex(value: string): number | null {
+  const key = normalizeWhitespace(value).toLowerCase().replace(/[^a-z]/g, '');
+  return Object.prototype.hasOwnProperty.call(MONTHS, key) ? MONTHS[key] : null;
+}
+
+function dateFromYearMonth(year: number | null, month: string | null): Date | null {
+  if (!year || !month) return null;
+  const monthNumber = monthIndex(month);
+  if (monthNumber === null) return null;
+  return new Date(Date.UTC(year, monthNumber, 1, 12, 0, 0));
+}
+
+function headingLevel(tagName: string): number {
+  const match = tagName.toLowerCase().match(/^h([1-6])$/);
+  return match ? Number(match[1]) : 99;
+}
+
+function looksLikeYear(text: string): number | null {
+  const match = normalizeWhitespace(text).match(/^(20\d{2})$/);
+  return match ? Number(match[1]) : null;
+}
+
+function looksLikeMonth(text: string): string | null {
+  const normalized = normalizeWhitespace(text).replace(/[^A-Za-z]/g, '');
+  return monthIndex(normalized) !== null ? normalized : null;
+}
+
+function titleSlug(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || sha256(title).slice(0, 16);
+}
+
+function collectFollowingUpdateContent($: cheerio.CheerioAPI, heading: Element): { summary: string; url: string | null; category: string | null } {
+  const startLevel = headingLevel(heading.tagName ?? 'h4');
+  const summaryParts: string[] = [];
+  let category: string | null = null;
+  let url: string | null = null;
+
+  // Walk through the next elements in document order until the next same-or-higher
+  // heading. This matches Zoho Projects, where each update is rendered as:
+  // h4 title -> category text -> description -> Read More link.
+  let cursor = $(heading).next();
+  let guard = 0;
+  while (cursor.length && guard < 80) {
+    guard += 1;
+    const node = cursor.get(0) as Element | undefined;
+    if (!node) break;
+    const tagName = (node.tagName ?? '').toLowerCase();
+    const text = normalizeWhitespace(cursor.text());
+
+    if (/^h[1-6]$/.test(tagName) && headingLevel(tagName) <= startLevel) {
+      break;
+    }
+
+    if (!category && /^(New|Enhancements?|Mobile App|Blogs?)$/i.test(text)) {
+      category = text;
+    } else if (tagName === 'a') {
+      const href = cursor.attr('href');
+      const linkText = normalizeWhitespace(cursor.text());
+      if (!url && href && /read more|learn more|more/i.test(linkText)) {
+        url = href;
+      }
+    } else if (text && text.length > 35 && !summaryParts.includes(text)) {
+      summaryParts.push(text);
+    }
+
+    // Also inspect links inside wrapper nodes, because some Zoho cards wrap the
+    // Read More anchor inside a div rather than making it a direct sibling.
+    if (!url) {
+      const nestedReadMore = cursor.find('a[href]').filter((_, anchor) => /read more|learn more|more/i.test(normalizeWhitespace($(anchor).text()))).first();
+      const nestedHref = nestedReadMore.attr('href');
+      if (nestedHref) url = nestedHref;
+    }
+
+    cursor = cursor.next();
+  }
+
+  return {
+    summary: normalizeWhitespace(summaryParts.join(' ')).slice(0, 900),
+    url,
+    category,
+  };
+}
+
+function collectProjectsTimelineCandidatesFromHtml(html: string, sourceUrl: string, sourceName = 'Zoho Projects'): CandidateLink[] {
+  const $ = cheerio.load(html);
+  const seen = new Set<string>();
+  const candidates: CandidateLink[] = [];
+  let currentYear: number | null = null;
+  let currentMonth: string | null = null;
+
+  $('h1,h2,h3,h4,h5,h6').each((_, rawHeading) => {
+    const heading = rawHeading as Element;
+    const tagName = (heading.tagName ?? '').toLowerCase();
+    const text = normalizeWhitespace($(heading).text());
+    if (!text) return;
+
+    const year = looksLikeYear(text);
+    if (year) {
+      currentYear = year;
+      currentMonth = null;
+      return;
+    }
+
+    const month = looksLikeMonth(text);
+    if (month && currentYear) {
+      currentMonth = month;
+      return;
+    }
+
+    const publishedAt = dateFromYearMonth(currentYear, currentMonth);
+    if (!publishedAt || publishedAt.getUTCFullYear() < 2026) return;
+    if (!/^h[4-6]$/.test(tagName)) return;
+    if (text.length < 4 || text.length > 180) return;
+    if (/^(timeline|all|blogs|enhancements?|mobile app|new)$/i.test(text)) return;
+
+    const content = collectFollowingUpdateContent($, heading);
+    if (/^Blogs?$/i.test(content.category ?? '')) return;
+    if (!content.summary || content.summary.length < 40) return;
+
+    let absoluteUrl: string;
+    try {
+      absoluteUrl = content.url ? new URL(content.url, sourceUrl).toString() : `${sourceUrl}#${titleSlug(text)}`;
+    } catch {
+      absoluteUrl = `${sourceUrl}#${titleSlug(text)}`;
+    }
+
+    const parsedUrl = new URL(absoluteUrl);
+    if (!isOfficialZohoHost(parsedUrl.hostname)) return;
+    if (!isOfficialUpdateLink({ product: 'projects', name: sourceName } as SourceConfig, parsedUrl)) return;
+
+    const normalizedUrl = normalizeCanonicalUrl(absoluteUrl);
+    if (seen.has(normalizedUrl)) return;
+    seen.add(normalizedUrl);
+
+    const categorySuffix = content.category ? ` (${content.category})` : '';
+    candidates.push({
+      title: normalizeWhitespace(`${text}${categorySuffix}`).slice(0, 220),
+      url: normalizedUrl,
+      summary: content.summary,
+      bodyText: normalizeWhitespace(`${text}. ${content.category ?? ''}. ${content.summary}`),
+      publishedAt,
+    });
+  });
+
+  return candidates.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
+}
+
 async function collectCandidatesFromSource(source: SourceConfig): Promise<CandidateLink[]> {
   const html = await fetchPage(source.url);
+
+  if (source.product === 'projects') {
+    const projectsCandidates = collectProjectsTimelineCandidatesFromHtml(html, source.url, source.name);
+    logger.info('Zoho Projects timeline cards parsed', {
+      source: source.name,
+      collected: projectsCandidates.length,
+      eligible2026: projectsCandidates.filter((candidate) => (candidate.publishedAt?.getUTCFullYear() ?? 0) >= 2026).length,
+      samples: projectsCandidates.slice(0, 8).map((item) => ({
+        title: item.title,
+        date: item.publishedAt?.toISOString() ?? null,
+        url: item.url,
+      })),
+    });
+    return projectsCandidates.slice(0, 25);
+  }
+
   const $ = cheerio.load(html);
   const seen = new Set<string>();
   const candidates: CandidateLink[] = [];
@@ -274,7 +489,7 @@ async function collectCandidatesFromSource(source: SourceConfig): Promise<Candid
       return;
     }
 
-    if (!['www.zoho.com', 'zoho.com'].includes(absolute.hostname.toLowerCase())) return;
+    if (!isOfficialZohoHost(absolute.hostname)) return;
     if (!isOfficialUpdateLink(source, absolute)) return;
 
     const normalized = normalizeCanonicalUrl(absolute.toString());
@@ -301,8 +516,6 @@ async function collectCandidatesFromSource(source: SourceConfig): Promise<Candid
     })),
   });
 
-  // Do not fall back to generic archive links: a source without dated 2026
-  // cards should simply produce no candidates rather than old blog content.
   return eligible.slice(0, 25);
 }
 
@@ -315,7 +528,13 @@ async function processCandidate(
   createdApproval: boolean;
   skipped: boolean;
 }> {
-  const parsed = await parseCandidatePage(candidate.url, candidate.title, candidate.publishedAt);
+  const parsed = await parseCandidatePage(
+    candidate.url,
+    candidate.title,
+    candidate.publishedAt,
+    candidate.summary,
+    candidate.bodyText,
+  );
   // HilTech publishes only current Zoho updates. A date must be present in the
   // official source and it must be from 2026 onward; undated pages are not sent
   // for approval because their recency cannot be verified.
