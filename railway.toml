@@ -1,0 +1,7 @@
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+startCommand = "node dist/src/server.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 300

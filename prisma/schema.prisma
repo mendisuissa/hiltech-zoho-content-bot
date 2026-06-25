@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceProduct {
+  crm
+  projects
+  desk
+}
+
+enum ContentCategory {
+  article
+  facebook_page
+  facebook_group
+  whatsapp
+  skip
+}
+
+enum ContentAudience {
+  business_owners
+  implementers_consultants
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+}
+
+model SourceConfig {
+  id        String       @id @default(cuid())
+  slug      String       @unique
+  name      String
+  url       String       @unique
+  product   SourceProduct
+  active    Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  items     SourceItem[]
+}
+
+model SourceItem {
+  id            String          @id @default(cuid())
+  sourceConfigId String
+  sourceConfig   SourceConfig    @relation(fields: [sourceConfigId], references: [id], onDelete: Cascade)
+  title         String
+  canonicalUrl  String          @unique
+  contentHash   String          @unique
+  summary       String
+  bodyText     String?
+  publishedAt   DateTime?
+  relevanceScore Int
+  category      ContentCategory
+  audience      ContentAudience
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  approvalRequest ApprovalRequest?
+}
+
+model ApprovalRequest {
+  id              String          @id @default(cuid())
+  sourceItemId    String          @unique
+  sourceItem      SourceItem      @relation(fields: [sourceItemId], references: [id], onDelete: Cascade)
+  approvalToken   String          @unique
+  status          ApprovalStatus  @default(pending)
+  title           String
+  canonicalUrl    String
+  sourceUrl       String
+  relevanceScore  Int
+  category        ContentCategory
+  audience        ContentAudience
+  articleDraft    Json?
+  facebookPageDraft Json?
+  facebookGroupDraft Json?
+  whatsappDraft   Json?
+  coverDraft      Json?
+  qualityScore    Int             @default(0)
+  qualityReport   Json?
+  editorialBrief  Json?
+  qualityStatus   String          @default("pending")
+  rewriteCount    Int             @default(0)
+  wordpressPostId String?
+  telegramMessageId String?
+  rejectionReason String?
+  approvedAt      DateTime?
+  rejectedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
