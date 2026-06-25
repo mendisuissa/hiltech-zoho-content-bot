@@ -97,40 +97,50 @@ export function collectProjectsTimelineCandidatesFromHtml(html: string, sourceUr
   const $ = cheerio.load(html);
   const output: ZohoProjectsTimelineCandidate[] = [];
   const seen = new Set<string>();
-  let year: number | null = null;
-  let month: string | null = null;
 
-  $('h1,h2,h3,h4,h5,h6').each((_, raw) => {
-    const heading = raw as Element;
-    const text = normalize($(heading).text());
-    const tag = (heading.tagName ?? '').toLowerCase();
-    if (!text) return;
+  // This selector matches the actual Zoho Projects What’s New DOM:
+  // .event-category-year-wrap#2026 > .event-category-wrap#2026-may > .event-category
+  // The title, summary and Read More link all live inside each event-category card.
+  $('.event-category-year-wrap').each((_, yearWrap) => {
+    const yearText = normalize($(yearWrap).children('h2').first().text()) || String($(yearWrap).attr('id') ?? '');
+    const yearMatch = yearText.match(/\b(20\d{2})\b/);
+    const year = yearMatch ? Number(yearMatch[1]) : null;
+    if (!year || year < 2026) return;
 
-    const possibleYear = headingYear(text);
-    if (possibleYear) { year = possibleYear; month = null; return; }
-    const possibleMonth = headingMonth(text);
-    if (possibleMonth && year) { month = possibleMonth; return; }
+    $(yearWrap).children('.event-category-wrap').each((_, monthWrap) => {
+      const monthText = normalize($(monthWrap).children('h3').first().text()) || String($(monthWrap).attr('id') ?? '').replace(/^\d{4}-/, '');
+      const publishedAt = dateFromTimeline(year, monthText);
+      if (!publishedAt) return;
 
-    const publishedAt = dateFromTimeline(year, month);
-    if (!publishedAt || publishedAt.getUTCFullYear() < 2026 || !/^h[4-6]$/.test(tag)) return;
-    if (text.length < 4 || text.length > 180 || /^(timeline|all|blogs?|enhancements?|mobile app|new)$/i.test(text)) return;
+      $(monthWrap).children('.event-category').each((_, card) => {
+        const titleText = normalize($(card).find('.head h4').first().text());
+        if (!titleText) return;
 
-    const card = readCardContent($, heading);
-    if (/^Blogs?$/i.test(card.category ?? '') || card.summary.length < 40) return;
+        const category = normalize($(card).find('.head .tag').first().text());
+        const summary = normalize($(card).find('.whatsnew-desc p').map((__, p) => $(p).text()).get().join(' ')).slice(0, 900);
+        const href = $(card).find('.whatsnew-desc a.read-more[href], .whatsnew-desc a[href]').first().attr('href');
+        if (summary.length < 40 || !href) return;
 
-    const url = new URL(card.href ?? `#${slug(text)}`, sourceUrl);
-    if (!isOfficialHelpOrZoho(url)) return;
-    const canonical = url.toString();
-    if (seen.has(canonical)) return;
-    seen.add(canonical);
+        let url: URL;
+        try {
+          url = new URL(href, sourceUrl);
+        } catch {
+          return;
+        }
+        if (!isOfficialHelpOrZoho(url)) return;
+        const canonical = url.toString();
+        if (seen.has(canonical)) return;
+        seen.add(canonical);
 
-    const label = card.category ? ` (${card.category})` : '';
-    output.push({
-      title: `${text}${label}`,
-      url: canonical,
-      summary: card.summary,
-      bodyText: normalize(`${text}. ${card.category ?? ''}. ${card.summary}`),
-      publishedAt,
+        const label = category ? ` (${category})` : '';
+        output.push({
+          title: `${titleText}${label}`,
+          url: canonical,
+          summary,
+          bodyText: normalize(`${titleText}. ${category}. ${summary}`),
+          publishedAt,
+        });
+      });
     });
   });
 
