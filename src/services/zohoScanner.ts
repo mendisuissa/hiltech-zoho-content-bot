@@ -35,6 +35,12 @@ type ParsedCandidate = {
   publishedAt?: Date | null;
 };
 
+type CandidateLink = {
+  title: string;
+  url: string;
+  publishedAt?: Date | null;
+};
+
 function pickText($: cheerio.CheerioAPI, selectors: string[]): string {
   for (const selector of selectors) {
     const element = $(selector).first();
@@ -70,21 +76,74 @@ function extractCanonicalUrl($: cheerio.CheerioAPI, fallbackUrl: string): string
   return normalizeCanonicalUrl(new URL(canonical, fallbackUrl).toString());
 }
 
-function extractPublishedAt($: cheerio.CheerioAPI): Date | null {
-  const values = [
-    $('meta[property="article:published_time"]').attr('content'),
-    $('meta[property="og:updated_time"]').attr('content'),
-    $('time[datetime]').first().attr('datetime'),
-    $('meta[name="date"]').attr('content'),
-  ].filter(Boolean) as string[];
-  for (const value of values) {
-    const parsed = new Date(value);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed;
-    }
+function parseOfficialDate(value: string | undefined | null): Date | null {
+  if (!value) return null;
+  const normalized = normalizeWhitespace(value).replace(/\s+/g, ' ').trim();
+  const direct = new Date(normalized);
+  if (!Number.isNaN(direct.getTime())) return direct;
+
+  const monthYear = normalized.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/i);
+  if (monthYear) {
+    const parsed = new Date(`${monthYear[1]} 1, ${monthYear[2]} 12:00:00 UTC`);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  const iso = normalized.match(/\b(20\d{2})[-/.](0?[1-9]|1[0-2])(?:[-/.]([0-3]?\d))?\b/);
+  if (iso) {
+    const parsed = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3] ?? 1)));
+    if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return null;
 }
+
+function extractJsonLdDates($: cheerio.CheerioAPI): Date[] {
+  const dates: Date[] = [];
+  $('script[type="application/ld+json"]').each((_, element) => {
+    const raw = $(element).contents().text();
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const visit = (value: unknown): void => {
+        if (Array.isArray(value)) return value.forEach(visit);
+        if (!value || typeof value !== 'object') return;
+        const record = value as Record<string, unknown>;
+        for (const key of ['datePublished', 'dateModified', 'uploadDate']) {
+          const date = parseOfficialDate(typeof record[key] === 'string' ? record[key] : undefined);
+          if (date) dates.push(date);
+        }
+        for (const nested of Object.values(record)) visit(nested);
+      };
+      visit(parsed);
+    } catch {
+      // Ignore malformed JSON-LD and continue with other official page signals.
+    }
+  });
+  return dates;
+}
+
+function extractPublishedAt($: cheerio.CheerioAPI): Date | null {
+  const values = [
+    $('meta[property="article:published_time"]').attr('content'),
+    $('meta[name="article:published_time"]').attr('content'),
+    $('meta[property="og:updated_time"]').attr('content'),
+    $('time[datetime]').first().attr('datetime'),
+    $('meta[name="date"]').attr('content'),
+    $('meta[name="publish-date"]').attr('content'),
+  ].filter(Boolean) as string[];
+
+  for (const value of values) {
+    const parsed = parseOfficialDate(value);
+    if (parsed) return parsed;
+  }
+
+  const jsonLdDate = extractJsonLdDates($).sort((a, b) => b.getTime() - a.getTime())[0];
+  if (jsonLdDate) return jsonLdDate;
+
+  const pageText = normalizeWhitespace($('main, article, body').first().text()).slice(0, 6000);
+  const textual = parseOfficialDate(pageText);
+  return textual;
+}
+
 
 async function fetchPage(url: string): Promise<string> {
   const response = await axios.get(url, {
@@ -96,7 +155,7 @@ async function fetchPage(url: string): Promise<string> {
   return response.data as string;
 }
 
-async function parseCandidatePage(url: string, fallbackTitle: string): Promise<ParsedCandidate> {
+async function parseCandidatePage(url: string, fallbackTitle: string, fallbackPublishedAt?: Date | null): Promise<ParsedCandidate> {
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
   const title = pickText($, ['meta[property="og:title"]', 'title', 'h1']) || fallbackTitle || url;
@@ -111,83 +170,85 @@ async function parseCandidatePage(url: string, fallbackTitle: string): Promise<P
     canonicalUrl,
     summary: normalizeWhitespace(summary),
     bodyText: normalizeWhitespace(bodyText),
-    publishedAt: extractPublishedAt($),
+    publishedAt: extractPublishedAt($) ?? fallbackPublishedAt ?? null,
   };
 }
 
-async function collectCandidatesFromSource(source: SourceConfig): Promise<Array<{ title: string; url: string }>> {
+function extractCardDate($: cheerio.CheerioAPI, element: cheerio.Element): Date | null {
+  const card = $(element).closest('article, li, .blog-card, .post, .card, .item, div').first();
+  const text = normalizeWhitespace(card.text());
+  return parseOfficialDate(text);
+}
+
+async function collectCandidatesFromSource(source: SourceConfig): Promise<CandidateLink[]> {
   const html = await fetchPage(source.url);
   const $ = cheerio.load(html);
   const seen = new Set<string>();
-  const candidates: Array<{ title: string; url: string }> = [];
+  const candidates: CandidateLink[] = [];
 
   $('a[href]').each((_, element) => {
     const href = $(element).attr('href');
-    if (!href) {
-      return;
-    }
+    if (!href) return;
     let absolute: URL;
-    try {
-      absolute = new URL(href, source.url);
-    } catch {
-      return;
-    }
-    if (!['www.zoho.com', 'zoho.com'].includes(absolute.hostname.toLowerCase())) {
-      return;
-    }
+    try { absolute = new URL(href, source.url); } catch { return; }
+    if (!['www.zoho.com', 'zoho.com'].includes(absolute.hostname.toLowerCase())) return;
     const path = absolute.pathname.toLowerCase();
-    if (
-      !path.includes('/crm/') &&
-      !path.includes('/projects/') &&
-      !path.includes('/desk/')
-    ) {
-      return;
-    }
-    if (/login|signup|pricing|support|contact/i.test(absolute.toString())) {
-      return;
-    }
+    if (!path.includes(`/${source.product === 'projects' ? 'projects' : source.product}/`)) return;
+    if (/login|signup|pricing|support|contact|help|terms|privacy/i.test(absolute.toString())) return;
     const normalized = normalizeCanonicalUrl(absolute.toString());
-    if (seen.has(normalized)) {
-      return;
-    }
+    if (seen.has(normalized)) return;
     const text = normalizeWhitespace($(element).text());
-    if (text.length < 5) {
-      return;
-    }
+    if (text.length < 8) return;
     seen.add(normalized);
-    candidates.push({ title: text.slice(0, 180), url: normalized });
+    candidates.push({ title: text.slice(0, 220), url: normalized, publishedAt: extractCardDate($, element) });
   });
 
   if (candidates.length === 0) {
-    const fallbackTitle =
-      pickText($, ['meta[property="og:title"]', 'title', 'h1']) || source.name;
-    candidates.push({ title: normalizeWhitespace(fallbackTitle), url: normalizeCanonicalUrl(source.url) });
+    const fallbackTitle = pickText($, ['meta[property="og:title"]', 'title', 'h1']) || source.name;
+    candidates.push({
+      title: normalizeWhitespace(fallbackTitle),
+      url: normalizeCanonicalUrl(source.url),
+      publishedAt: extractPublishedAt($),
+    });
   }
 
-  return candidates.slice(0, 20);
+  // Prefer cards that include an explicit 2026+ date and process recent entries first.
+  return candidates
+    .sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0))
+    .slice(0, 35);
 }
+
 
 async function processCandidate(
   source: SourceConfig,
-  candidate: { title: string; url: string },
+  candidate: CandidateLink,
 ): Promise<{
   sourceItem?: SourceItem;
   approvalRequest?: ApprovalRequest;
   createdApproval: boolean;
   skipped: boolean;
 }> {
-  const parsed = await parseCandidatePage(candidate.url, candidate.title);
+  const parsed = await parseCandidatePage(candidate.url, candidate.title, candidate.publishedAt);
   // HilTech publishes only current Zoho updates. A date must be present in the
   // official source and it must be from 2026 onward; undated pages are not sent
   // for approval because their recency cannot be verified.
   const publicationYear = parsed.publishedAt?.getUTCFullYear();
   if (!publicationYear || publicationYear < 2026) {
     logger.info('Skipping non-current or undated Zoho item', {
+      source: source.name,
       url: parsed.canonicalUrl,
       publishedAt: parsed.publishedAt?.toISOString() ?? null,
+      eligible: false,
     });
     return { skipped: true, createdApproval: false };
   }
+
+  logger.info('Eligible official Zoho update detected', {
+    source: source.name,
+    title: parsed.title,
+    detectedDate: parsed.publishedAt?.toISOString(),
+    eligible: true,
+  });
 
   const relevance = scoreZohoItem({
     title: parsed.title,
@@ -313,7 +374,7 @@ export async function runZohoScan(): Promise<ScanResult> {
   for (const source of sources) {
     result.sourcesProcessed += 1;
     logger.info('Scanning source', { source: source.name, url: source.url });
-    let candidates: Array<{ title: string; url: string }> = [];
+    let candidates: CandidateLink[] = [];
     try {
       candidates = await collectCandidatesFromSource(source);
     } catch (error) {
