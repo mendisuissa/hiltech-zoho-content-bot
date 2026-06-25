@@ -12,7 +12,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:seed": "tsx prisma/seed.ts"
+    "prisma:seed": "tsx prisma/seed.ts",
+    "test:zoho-live": "RUN_LIVE_ZOHO_TEST=1 vitest run tests/zohoProjectsParser.live.test.ts --pool=threads --poolOptions.threads.singleThread"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

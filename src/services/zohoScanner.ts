@@ -19,6 +19,7 @@ import { assessContentQuality, qualityScore, buildRewriteInstructions } from './
 import { createEditorialBrief, normalizeEditorialBrief } from './editorialService';
 import { sendApprovalNotification } from './telegramService';
 import { sourceConfigs } from '../config/sources';
+import { collectProjectsTimelineCandidatesFromHtml as parseProjectsTimeline } from './zohoProjectsParser';
 
 export type ScanResult = {
   sourcesProcessed: number;
@@ -391,7 +392,7 @@ function collectFollowingUpdateContent($: cheerio.CheerioAPI, heading: Element):
   };
 }
 
-function collectProjectsTimelineCandidatesFromHtml(html: string, sourceUrl: string, sourceName = 'Zoho Projects'): CandidateLink[] {
+export function collectProjectsTimelineCandidatesFromHtml(html: string, sourceUrl: string, sourceName = 'Zoho Projects'): CandidateLink[] {
   const $ = cheerio.load(html);
   const seen = new Set<string>();
   const candidates: CandidateLink[] = [];
@@ -459,7 +460,7 @@ async function collectCandidatesFromSource(source: SourceConfig): Promise<Candid
   const html = await fetchPage(source.url);
 
   if (source.product === 'projects') {
-    const projectsCandidates = collectProjectsTimelineCandidatesFromHtml(html, source.url, source.name);
+    const projectsCandidates = parseProjectsTimeline(html, source.url);
     logger.info('Zoho Projects timeline cards parsed', {
       source: source.name,
       collected: projectsCandidates.length,
