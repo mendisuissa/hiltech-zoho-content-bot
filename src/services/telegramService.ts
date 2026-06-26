@@ -123,6 +123,10 @@ async function sendMessage(text: string, replyMarkup?: TelegramInlineKeyboard): 
   return result.message_id;
 }
 
+export async function sendTelegramTextMessage(text: string): Promise<void> {
+  await sendMessage(text);
+}
+
 async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
   await sendTelegram('answerCallbackQuery', {
     callback_query_id: callbackQueryId,

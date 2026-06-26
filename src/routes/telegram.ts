@@ -1,4 +1,4 @@
-import { Router, type Request, type Response, type NextFunction } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { prisma } from '../db/prisma';
 import { env } from '../config/env';
 import {
@@ -9,12 +9,23 @@ import {
   sendApprovalPreview,
   sendDetailedApprovalPreview,
   generateAndSendCoverImage,
+  sendTelegramTextMessage,
   type TelegramCallbackQuery,
 } from '../services/telegramService';
 import { logger } from '../utils/logger';
 import { regeneratePendingApproval } from '../services/regenerationService';
+import { executeHiltechKernelTask } from '../services/kernelClient';
 
-type TelegramUpdate = { callback_query?: TelegramCallbackQuery };
+type TelegramMessage = {
+  message_id: number;
+  chat: { id: number | string };
+  text?: string;
+};
+
+type TelegramUpdate = {
+  callback_query?: TelegramCallbackQuery;
+  message?: TelegramMessage;
+};
 
 export const telegramRouter = Router();
 
@@ -27,32 +38,92 @@ async function getPendingApproval(id: string) {
   return prisma.approvalRequest.findFirst({ where: { id, status: 'pending' } });
 }
 
+async function processTelegramMessage(update: TelegramUpdate): Promise<void> {
+  const message = update.message;
+  const text = message?.text?.trim();
+
+  if (!message || !text) return;
+
+  if (!isConfiguredApprovalChat(message.chat.id)) {
+    logger.warn('Telegram message ignored from unauthorized chat', {
+      chatId: message.chat.id,
+    });
+    return;
+  }
+
+  if (text.startsWith('/start')) {
+    await sendTelegramTextMessage(
+      'היי 👋 אני HilaBot. אפשר לכתוב לי בקשה חופשית, למשל: "תכיני לי פוסט וואטסאפ קצר על Zoho CRM".'
+    );
+    return;
+  }
+
+  try {
+    await sendTelegramTextMessage('🧠 קיבלתי, מכינה תשובה…');
+
+    const result = await executeHiltechKernelTask(text);
+
+    if (!result.ok) {
+      await sendTelegramTextMessage(
+        [
+          '⚠️ עצרתי לפני ביצוע.',
+          result.status ? `סטטוס: ${result.status}` : '',
+          result.message ? `סיבה: ${result.message}` : '',
+          result.capabilityId ? `יכולת: ${result.capabilityId}` : '',
+        ].filter(Boolean).join('\n')
+      );
+      return;
+    }
+
+    await sendTelegramTextMessage(result.output || 'בוצע, אבל לא חזר פלט.');
+  } catch (error) {
+    logger.error('Telegram smart message processing failed', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+
+    await sendTelegramTextMessage('❌ הייתה שגיאה בעיבוד הבקשה. נסי שוב עוד רגע.');
+  }
+}
+
 async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
   const callback = update.callback_query;
   if (!callback?.data || !callback.message) return;
 
   if (!isConfiguredApprovalChat(callback.message.chat.id)) {
-    try { await acknowledgeTelegramCallback(callback.id, 'הפעולה מותרת רק בקבוצת ניהול HilTech.'); } catch (error) {
-      logger.warn('Telegram callback acknowledgement failed', { error: error instanceof Error ? error.message : String(error) });
+    try {
+      await acknowledgeTelegramCallback(callback.id, 'הפעולה מותרת רק בקבוצת ניהול HilTech.');
+    } catch (error) {
+      logger.warn('Telegram callback acknowledgement failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return;
   }
 
   const [action, approvalId] = callback.data.split(':', 2);
   if (!approvalId || !['preview', 'approve', 'reject', 'cover', 'regenerate'].includes(action)) {
-    try { await acknowledgeTelegramCallback(callback.id, 'פעולה לא תקינה.'); } catch (error) {
-      logger.warn('Telegram callback acknowledgement failed', { error: error instanceof Error ? error.message : String(error) });
+    try {
+      await acknowledgeTelegramCallback(callback.id, 'פעולה לא תקינה.');
+    } catch (error) {
+      logger.warn('Telegram callback acknowledgement failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return;
   }
 
-  // Acknowledge immediately. Telegram expects a webhook response quickly, while
-  // preview/regeneration can take longer because it may call OpenAI.
   try {
-    await acknowledgeTelegramCallback(callback.id, action === 'regenerate' ? 'הכתיבה מחדש התחילה…' : 'הפעולה התקבלה…');
+    await acknowledgeTelegramCallback(
+      callback.id,
+      action === 'regenerate' ? 'הכתיבה מחדש התחילה…' : 'הפעולה התקבלה…'
+    );
   } catch (error) {
-    // A stale/retried callback can no longer be acknowledged. Do not fail the work.
-    logger.warn('Telegram callback acknowledgement failed', { approvalId, action, error: error instanceof Error ? error.message : String(error) });
+    logger.warn('Telegram callback acknowledgement failed', {
+      approvalId,
+      action,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   const approval = await getPendingApproval(approvalId);
@@ -87,6 +158,7 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
       where: { id: approval.id },
       data: { status: 'approved', approvedAt: new Date() },
     });
+
     await sendApprovedContentPack(updated);
     await markTelegramApprovalMessage(updated, 'approved', callback);
     logger.info('Telegram approval completed', { approvalId: approval.id });
@@ -95,23 +167,41 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
 
   const updated = await prisma.approvalRequest.update({
     where: { id: approval.id },
-    data: { status: 'rejected', rejectedAt: new Date(), rejectionReason: 'Rejected from Telegram' },
+    data: {
+      status: 'rejected',
+      rejectedAt: new Date(),
+      rejectionReason: 'Rejected from Telegram',
+    },
   });
+
   await markTelegramApprovalMessage(updated, 'rejected', callback);
   logger.info('Telegram rejection completed', { approvalId: approval.id });
 }
 
 async function sendApprovalPreviewMessageUnavailable(_chatId: number | string, text: string): Promise<void> {
-  // Keep webhook failures isolated. The detailed status is already logged server-side.
   logger.info('Telegram callback unavailable', { text });
 }
 
 telegramRouter.post('/webhook', (req: Request, res: Response) => {
-  if (!verifyTelegramWebhook(req)) return res.status(401).json({ error: 'Unauthorized' });
+  if (!verifyTelegramWebhook(req)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
-  // Respond immediately so Telegram never retries while content generation is running.
   res.sendStatus(200);
-  void processTelegramCallback(req.body as TelegramUpdate).catch((error) => {
+
+  const update = req.body as TelegramUpdate;
+
+  if (update.message) {
+    void processTelegramMessage(update).catch((error) => {
+      logger.error('Telegram webhook message processing failed', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    });
+    return;
+  }
+
+  void processTelegramCallback(update).catch((error) => {
     logger.error('Telegram webhook callback processing failed', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
