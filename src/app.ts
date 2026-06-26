@@ -13,6 +13,14 @@ export function createApp() {
   app.use('/api/scan', scanRouter);
   app.use('/api/approvals', approvalsRouter);
   app.use('/api/telegram', telegramRouter);
+  app.get('/api/smart/health', (_req, res) => {
+    return res.json({
+      ok: true,
+      service: 'HilaBot Smart Kernel Bridge',
+      route: '/api/smart',
+      tenantId: 'hiltech'
+    });
+  });
   app.post('/api/smart', async (req, res, next) => {
     try {
       const text = String(req.body?.text || '').trim();
