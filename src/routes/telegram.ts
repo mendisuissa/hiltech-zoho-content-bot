@@ -10,6 +10,7 @@ import {
   sendDetailedApprovalPreview,
   generateAndSendCoverImage,
   sendTelegramTextMessage,
+  sendTelegramMenuMessage,
   type TelegramCallbackQuery,
 } from '../services/telegramService';
 import { logger } from '../utils/logger';
@@ -51,10 +52,14 @@ async function processTelegramMessage(update: TelegramUpdate): Promise<void> {
     return;
   }
 
-  if (text.startsWith('/start')) {
-    await sendTelegramTextMessage(
-      'היי 👋 אני HilaBot. אפשר לכתוב לי בקשה חופשית, למשל: "תכיני לי פוסט וואטסאפ קצר על Zoho CRM".'
-    );
+  if (text.startsWith('/start') || text.startsWith('/menu') || text.startsWith('/hmenu')) {
+    await sendTelegramMenuMessage();
+    return;
+  }
+
+  // Skip unknown slash commands — don't route to kernel
+  if (text.startsWith('/')) {
+    await sendTelegramTextMessage('❓ פקודה לא מוכרת. שלחי /menu לתפריט הראשי.');
     return;
   }
 
@@ -102,6 +107,31 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
   }
 
   const [action, approvalId] = callback.data.split(':', 2);
+
+  // Menu shortcut buttons — route to kernel as natural language
+  if (action === 'menu') {
+    await acknowledgeTelegramCallback(callback.id, 'מכינה תוכן…').catch(() => undefined);
+    const promptMap: Record<string, string> = {
+      whatsapp:  'תכיני לי פוסט WhatsApp מקצועי על חידוש אחרון ב-Zoho CRM',
+      facebook:  'תכיני לי פוסט פייסבוק עסקי על חידוש אחרון ב-Zoho CRM',
+      article:   'כתבי מאמר עומק על נושא מעניין ב-Zoho CRM',
+      tip:       'תני טיפ מקצועי קצר ופרקטי על Zoho CRM — מהשטח',
+    };
+    const prompt = promptMap[approvalId] ?? 'תכיני לי תוכן על Zoho CRM';
+    try {
+      await sendTelegramTextMessage('🧠 מכינה תוכן…');
+      const result = await executeHiltechKernelTask(prompt);
+      if (!result.ok) {
+        await sendTelegramTextMessage(result.message ?? 'לא הצלחתי להכין תוכן.');
+      } else {
+        await sendTelegramTextMessage(result.output ?? 'בוצע.');
+      }
+    } catch (err) {
+      await sendTelegramTextMessage('❌ שגיאה בהכנת תוכן. נסי שוב.');
+    }
+    return;
+  }
+
   if (!approvalId || !['preview', 'approve', 'reject', 'cover', 'regenerate'].includes(action)) {
     try {
       await acknowledgeTelegramCallback(callback.id, 'פעולה לא תקינה.');

@@ -127,6 +127,33 @@ export async function sendTelegramTextMessage(text: string): Promise<void> {
   await sendMessage(text);
 }
 
+export async function sendTelegramMenuMessage(): Promise<void> {
+  const menuText =
+    `🟠 <b>HilTech — מרכז תוכן Zoho</b>\n\n` +
+    `ברוכה הבאה הילה 👋\n` +
+    `כאן תוכלי לנהל את תוכן ה-Zoho שלך.\n\n` +
+    `<b>פקודות זמינות:</b>\n` +
+    `• שלחי בקשה חופשית — אכין לך תוכן\n` +
+    `• "תכיני לי פוסט וואטסאפ על Blueprint ב-Zoho CRM"\n` +
+    `• "כתבי מאמר על אוטומציה עם Zoho Flow"\n` +
+    `• "הכיני תוכן לפייסבוק על Zoho Analytics"`;
+
+  const keyboard: TelegramInlineKeyboard = {
+    inline_keyboard: [
+      [
+        { text: '📱 פוסט WhatsApp',     callback_data: 'menu:whatsapp' },
+        { text: '📘 פוסט פייסבוק',      callback_data: 'menu:facebook' },
+      ],
+      [
+        { text: '📝 מאמר עומק',          callback_data: 'menu:article' },
+        { text: '💡 טיפ מקצועי',         callback_data: 'menu:tip' },
+      ],
+    ],
+  };
+
+  await sendMessage(menuText, keyboard);
+}
+
 async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
   await sendTelegram('answerCallbackQuery', {
     callback_query_id: callbackQueryId,
