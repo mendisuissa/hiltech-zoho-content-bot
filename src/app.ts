@@ -3,6 +3,7 @@ import { healthRouter } from './routes/health';
 import { scanRouter } from './routes/scan';
 import { approvalsRouter } from './routes/approvals';
 import { telegramRouter } from './routes/telegram';
+import { dashboardRouter } from './routes/dashboard';
 import { executeHiltechKernelTask } from './services/kernelClient';
 
 export function createApp() {
@@ -10,6 +11,7 @@ export function createApp() {
   app.use(express.json({ limit: '2mb' }));
 
   app.use('/health', healthRouter);
+  app.use('/api/dashboard', dashboardRouter);
   app.use('/api/scan', scanRouter);
   app.use('/api/approvals', approvalsRouter);
   app.use('/api/telegram', telegramRouter);
