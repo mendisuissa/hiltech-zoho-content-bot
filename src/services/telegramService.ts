@@ -132,9 +132,8 @@ export async function sendTelegramTextMessage(text: string): Promise<void> {
 }
 
 function _dashboardUrl(): string {
-  const base = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-    : 'https://killwindowsapp-mvp-production.up.railway.app';
+  // Dashboard lives on the ME app (KillWindowsApp-Mvp), not on the HilTech bot service
+  const base = process.env.ME_APP_URL || 'https://killwindowsapp-mvp-production.up.railway.app';
   const token = process.env.DASHBOARD_TOKEN || 'me2026';
   return `${base}/dashboard/hiltech?token=${token}`;
 }
