@@ -8,8 +8,12 @@ import { prisma } from '../db/prisma';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
+type TelegramInlineKeyboardButton =
+  | { text: string; callback_data: string }
+  | { text: string; url: string };
+
 type TelegramInlineKeyboard = {
-  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  inline_keyboard: Array<Array<TelegramInlineKeyboardButton>>;
 };
 
 export type TelegramCallbackQuery = {
@@ -127,6 +131,14 @@ export async function sendTelegramTextMessage(text: string): Promise<void> {
   await sendMessage(text);
 }
 
+function _dashboardUrl(): string {
+  const base = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : 'https://killwindowsapp-mvp-production.up.railway.app';
+  const token = process.env.DASHBOARD_TOKEN || 'me2026';
+  return `${base}/dashboard/hiltech?token=${token}`;
+}
+
 export async function sendTelegramMenuMessage(): Promise<void> {
   const menuText =
     `🟠 <b>HilTech — מרכז תוכן Zoho</b>\n\n` +
@@ -147,6 +159,9 @@ export async function sendTelegramMenuMessage(): Promise<void> {
       [
         { text: '📝 מאמר עומק',          callback_data: 'menu:article' },
         { text: '💡 טיפ מקצועי',         callback_data: 'menu:tip' },
+      ],
+      [
+        { text: '📊 דשבורד HilTech', url: _dashboardUrl() },
       ],
     ],
   };
