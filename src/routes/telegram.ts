@@ -13,6 +13,7 @@ import {
   sendTelegramMenuMessage,
   type TelegramCallbackQuery,
 } from '../services/telegramService';
+import { runZohoScan } from '../services/zohoScanner';
 import { logger } from '../utils/logger';
 import { regeneratePendingApproval } from '../services/regenerationService';
 import { executeHiltechKernelTask } from '../services/kernelClient';
@@ -111,6 +112,19 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
   // Menu shortcut buttons — route to kernel as natural language
   if (action === 'menu') {
     await acknowledgeTelegramCallback(callback.id, 'מכינה תוכן…').catch(() => undefined);
+    if (approvalId === 'ingest') {
+      await acknowledgeTelegramCallback(callback.id, 'קולטת חידושים…').catch(() => undefined);
+      try {
+        await sendTelegramTextMessage('📰 מתחילה קליטת חידושים מ-Zoho…');
+        const result = await runZohoScan();
+        const count = result?.itemsStored ?? 0;
+        await sendTelegramTextMessage(`✅ קליטה הסתיימה — ${count} חידושים נשמרו`);
+      } catch (err) {
+        await sendTelegramTextMessage('❌ קליטה נכשלה. בדקי לוגים.');
+      }
+      return;
+    }
+
     const promptMap: Record<string, string> = {
       whatsapp:  'תכיני לי פוסט WhatsApp מקצועי על חידוש אחרון ב-Zoho CRM',
       facebook:  'תכיני לי פוסט פייסבוק עסקי על חידוש אחרון ב-Zoho CRM',

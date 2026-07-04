@@ -134,7 +134,7 @@ export async function sendTelegramTextMessage(text: string): Promise<void> {
 function _dashboardUrl(): string {
   // Dashboard lives on the ME app (KillWindowsApp-Mvp), not on the HilTech bot service
   const base = process.env.ME_APP_URL || 'https://killwindowsapp-mvp-production.up.railway.app';
-  const token = process.env.DASHBOARD_TOKEN || 'me2026';
+  const token = process.env.DASHBOARD_TOKEN || 'mendi-bridge-xK9mPqR7wZ2024';
   return `${base}/dashboard/hiltech?token=${token}`;
 }
 
@@ -158,6 +158,9 @@ export async function sendTelegramMenuMessage(): Promise<void> {
       [
         { text: '📝 מאמר עומק',          callback_data: 'menu:article' },
         { text: '💡 טיפ מקצועי',         callback_data: 'menu:tip' },
+      ],
+      [
+        { text: '📰 קלוט חידושים', callback_data: 'menu:ingest' },
       ],
       [
         { text: '📊 דשבורד HilTech', url: _dashboardUrl() },
