@@ -16,7 +16,7 @@ import {
 import { runZohoScan } from '../services/zohoScanner';
 import { logger } from '../utils/logger';
 import { regeneratePendingApproval } from '../services/regenerationService';
-import { executeHiltechKernelTask } from '../services/kernelClient';
+import { generateContentPack } from '../services/contentGenerator';
 
 type TelegramMessage = {
   message_id: number;
@@ -109,7 +109,7 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
 
   const [action, approvalId] = callback.data.split(':', 2);
 
-  // Menu shortcut buttons — route to kernel as natural language
+  // Menu shortcut buttons
   if (action === 'menu') {
     await acknowledgeTelegramCallback(callback.id, 'מכינה תוכן…').catch(() => undefined);
     if (approvalId === 'ingest') {
@@ -125,24 +125,96 @@ async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
       return;
     }
 
-    const promptMap: Record<string, string> = {
-      whatsapp:  'תכיני לי פוסט WhatsApp מקצועי על חידוש אחרון ב-Zoho CRM',
-      facebook:  'תכיני לי פוסט פייסבוק עסקי על חידוש אחרון ב-Zoho CRM',
-      article:   'כתבי מאמר עומק על נושא מעניין ב-Zoho CRM',
-      tip:       'תני טיפ מקצועי קצר ופרקטי על Zoho CRM — מהשטח',
-    };
-    const prompt = promptMap[approvalId] ?? 'תכיני לי תוכן על Zoho CRM';
-    try {
-      await sendTelegramTextMessage('🧠 מכינה תוכן…');
-      const result = await executeHiltechKernelTask(prompt);
-      if (!result.ok) {
-        await sendTelegramTextMessage(result.message ?? 'לא הצלחתי להכין תוכן.');
-      } else {
-        await sendTelegramTextMessage(result.output ?? 'בוצע.');
+    if (['facebook', 'whatsapp', 'article'].includes(approvalId ?? '')) {
+      try {
+        await sendTelegramTextMessage('🧠 מכינה תוכן על בסיס החידוש האחרון שנקלט…');
+
+        // Fetch latest ingested item from DB
+        const item = await prisma.sourceItem.findFirst({
+          orderBy: { publishedAt: 'desc' },
+          where: { publishedAt: { not: null } },
+          include: { sourceConfig: true },
+        });
+
+        if (!item || !item.sourceConfig) {
+          await sendTelegramTextMessage('📭 אין חידושים בבסיס הנתונים. הרצי קליטה קודם.');
+          return;
+        }
+
+        const pack = await generateContentPack(item.sourceConfig, item);
+
+        if (approvalId === 'facebook') {
+          const post = pack.facebookPageDraft.raw;
+          const text = [
+            `📣 <b>פוסט לעמוד Facebook</b>`,
+            `<i>מבוסס על: ${item.title?.slice(0, 80)}</i>`,
+            '',
+            post.postText ?? '',
+            post.cta ? `\n${post.cta}` : '',
+          ].filter(Boolean).join('\n');
+          await sendTelegramTextMessage(text);
+        } else if (approvalId === 'whatsapp') {
+          const msg = pack.whatsappDraft.raw;
+          const text = [
+            `💬 <b>הודעת WhatsApp</b>`,
+            `<i>מבוסס על: ${item.title?.slice(0, 80)}</i>`,
+            '',
+            msg.messageText ?? '',
+          ].filter(Boolean).join('\n');
+          await sendTelegramTextMessage(text);
+        } else if (approvalId === 'article') {
+          const article = pack.articleDraft.raw;
+          const text = [
+            `📝 <b>${article.title ?? item.title}</b>`,
+            article.excerpt ? `\n<i>${article.excerpt}</i>` : '',
+            '',
+            article.bodyHtml
+              ?.replace(/<br\s*\/?>/gi, '\n')
+              .replace(/<\/p>/gi, '\n\n')
+              .replace(/<[^>]+>/g, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim()
+              .slice(0, 3500) ?? '',
+          ].filter(Boolean).join('\n');
+          await sendTelegramTextMessage(text);
+        }
+      } catch (err) {
+        await sendTelegramTextMessage('❌ שגיאה בהכנת תוכן. נסי שוב.');
       }
-    } catch (err) {
-      await sendTelegramTextMessage('❌ שגיאה בהכנת תוכן. נסי שוב.');
+      return;
     }
+
+    // tip — still kernel-free, direct OpenAI call
+    if (approvalId === 'tip') {
+      try {
+        await sendTelegramTextMessage('💡 מכינה טיפ…');
+        const { default: OpenAI } = await import('openai');
+        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const res = await client.chat.completions.create({
+          model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+          temperature: 0.85,
+          max_tokens: 300,
+          messages: [{
+            role: 'user',
+            content: `אתה הילה סויסה — מומחית Zoho CRM ישראלית. תני טיפ מקצועי אחד.
+
+חוקים:
+- פתחי עם בעיה שמנהל/ת מכירות מכיר/ה ("כמה פעמים קרה לך ש...")
+- ציין פיצ'ר ספציפי בשמו המדויק (Blueprint, Cadence, SalesSignals, Workflow...)
+- הסבירי מה עושים בשלב אחד או שניים — לא תיאוריה
+- אין "מרגש", אין "שמחים", אין "חידוש מהפכני"
+- 4-6 שורות. עברית ישירה.`,
+          }],
+        });
+        const tip = res.choices[0]?.message?.content?.trim() ?? 'לא הצלחתי ליצור טיפ.';
+        await sendTelegramTextMessage(`💡 <b>טיפ Zoho</b>\n\n${tip}`);
+      } catch (err) {
+        await sendTelegramTextMessage('❌ שגיאה. נסי שוב.');
+      }
+      return;
+    }
+
+    await sendTelegramTextMessage('פעולה לא מוכרת.');
     return;
   }
 
