@@ -17,6 +17,7 @@ import { runZohoScan } from '../services/zohoScanner';
 import { logger } from '../utils/logger';
 import { regeneratePendingApproval } from '../services/regenerationService';
 import { generateContentPack } from '../services/contentGenerator';
+import { executeHiltechKernelTask } from '../services/kernelClient';
 
 type TelegramMessage = {
   message_id: number;
