@@ -1,3 +1,4 @@
+import { holdHiltech } from './actionSecurity';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { Element } from 'domhandler';
@@ -721,6 +722,7 @@ export async function runZohoScan(): Promise<ScanResult> {
 }
 
 export async function getPendingApprovals() {
+  holdHiltech();
   return prisma.approvalRequest.findMany({
     where: { status: 'pending' },
     orderBy: { createdAt: 'desc' },

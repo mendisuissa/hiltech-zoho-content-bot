@@ -1,124 +1,30 @@
-import { Router, type NextFunction, type Request, type Response } from 'express';
+import { Router } from 'express';
 import { prisma } from '../db/prisma';
-import { sendApprovedContentPack, sendApprovalNotification } from '../services/telegramService';
-import { logger } from '../utils/logger';
-import { regeneratePendingApproval } from '../services/regenerationService';
+import { requireCaller, heldResponse } from '../services/actionSecurity';
 
-export const approvalsRouter = Router();
-
-function getSingleRouteId(routeId: string | string[] | undefined): string | undefined {
-  return typeof routeId === 'string' && routeId.trim().length > 0 ? routeId : undefined;
+// Optional boundary is supplied only by trusted startup, never by HTTP fields.
+export function createApprovalsRouter(boundary?:any) {
+  const router=Router();
+  router.get('/pending',async(req,res,next)=>{
+    if(!requireCaller(req,res))return;
+    try {
+      const rows=await prisma.approvalRequest.findMany({where:{status:'pending'},orderBy:{createdAt:'desc'},select:{id:true,title:true,createdAt:true},take:100});
+      return res.json({ok:true,items:rows.map(row=>({id:row.id,title:row.title,createdAt:row.createdAt,state:'GENERATED'}))});
+    }catch {return res.status(503).json({error:'P0_PENDING_UNAVAILABLE'});}
+  });
+  for(const action of ['approve','reject'])router.get('/:id/'+action,(_req,res)=>res.status(405).json({error:'P0_MUTATING_GET_REMOVED'}));
+  router.post('/:id/approve',async(req,res)=>{
+    if(!requireCaller(req,res))return;
+    if(!boundary)return heldResponse(res);
+    try {
+      const body=req.body;
+      if(!body||Object.keys(body).sort().join(',')!=='proof,requestId')return res.status(400).json({error:'P0_INVALID_REQUEST'});
+      return res.json(await boundary.approve(req,{artifactId:req.params.id,requestId:body.requestId},body.proof));
+    }catch{return res.status(403).json({error:'P0_APPROVAL_DENIED'});}
+  });
+  // Token-based rejection, regeneration and bulk re-send have no valid scoped
+  // contract. Preserve URLs with explicit holds rather than unsafe behavior.
+  for(const path of ['/:id/reject','/:id/regenerate','/resend-pending'])router.post(path,(req,res)=>{if(requireCaller(req,res))return heldResponse(res);});
+  return router;
 }
-
-function approvalTokenFromRequest(req: Pick<Request, 'header' | 'body' | 'query'>): string | undefined {
-  const headerToken = req.header('x-approval-token');
-  if (headerToken) return headerToken;
-  if (typeof req.body === 'object' && req.body !== null && 'token' in req.body) {
-    const token = (req.body as { token?: unknown }).token;
-    if (typeof token === 'string') return token;
-  }
-  return typeof req.query?.token === 'string' ? req.query.token : undefined;
-}
-
-async function loadPendingApproval(id: string) {
-  return prisma.approvalRequest.findFirst({ where: { id, status: 'pending' }, include: { sourceItem: { include: { sourceConfig: true } } } });
-}
-
-approvalsRouter.get('/pending', async (_req, res, next) => {
-  try {
-    const pending = await prisma.approvalRequest.findMany({ where: { status: 'pending' }, orderBy: { createdAt: 'desc' }, include: { sourceItem: { include: { sourceConfig: true } } } });
-    return res.json({ ok: true, items: pending.map((item) => ({ ...item, approvePath: `/api/approvals/${item.id}/approve?token=${item.approvalToken}`, rejectPath: `/api/approvals/${item.id}/reject?token=${item.approvalToken}` })) });
-  } catch (error) { return next(error); }
-});
-
-/**
- * Re-sends pending approval cards to the configured Telegram management chat.
- * Useful after a deploy that adds Telegram buttons or changes formatting.
- * Protected with the same x-scan-secret used by the scan endpoint.
- */
-approvalsRouter.post('/resend-pending', async (req, res, next) => {
-  try {
-    const scanSecret = req.header('x-scan-secret');
-    if (!scanSecret || scanSecret !== process.env.SCAN_SECRET) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 12;
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 25) : 12;
-
-    const pending = await prisma.approvalRequest.findMany({
-      where: {
-        status: 'pending',
-        sourceItem: { publishedAt: { gte: new Date('2026-01-01T00:00:00.000Z') } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      include: { sourceItem: true },
-    });
-
-    let sent = 0;
-    const failures: Array<{ approvalId: string; error: string }> = [];
-    for (const approval of pending) {
-      try {
-        await sendApprovalNotification(approval, approval.sourceItem);
-        sent += 1;
-      } catch (error) {
-        failures.push({
-          approvalId: approval.id,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-      }
-    }
-
-    logger.info('Pending Telegram approvals resent', { requested: pending.length, sent, failures: failures.length });
-    return res.json({ ok: true, requested: pending.length, sent, failures });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-approvalsRouter.post('/:id/regenerate', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const approvalId = getSingleRouteId(req.params.id);
-    if (!approvalId) return res.status(400).json({ error: 'Invalid approval id' });
-    const scanSecret = req.header('x-scan-secret');
-    if (scanSecret !== process.env.SCAN_SECRET) return res.status(401).json({ error: 'Unauthorized' });
-    const regenerated = await regeneratePendingApproval(approvalId);
-    if (!regenerated) return res.status(404).json({ error: 'Pending approval not found' });
-    await sendApprovalNotification(regenerated, regenerated.sourceItem);
-    return res.json({ ok: true, approvalId: regenerated.id, qualityStatus: regenerated.qualityStatus, qualityScore: regenerated.qualityScore });
-  } catch (error) { return next(error); }
-});
-
-async function approveRequest(req: Request, res: Response, next: NextFunction) {
-  try {
-    const approvalId = getSingleRouteId(req.params.id);
-    if (!approvalId) return res.status(400).json({ error: 'Invalid approval id' });
-    const approval = await loadPendingApproval(approvalId);
-    if (!approval) return res.status(404).json({ error: 'Pending approval not found' });
-    if (approvalTokenFromRequest(req) !== approval.approvalToken) return res.status(401).json({ error: 'Invalid approval token' });
-    const updated = await prisma.approvalRequest.update({ where: { id: approval.id }, data: { status: 'approved', approvedAt: new Date() } });
-    await sendApprovedContentPack(updated);
-    logger.info('Approval approved and content delivered to Telegram', { approvalId: approval.id });
-    return res.json({ ok: true, approval: updated, delivery: 'telegram' });
-  } catch (error) { return next(error); }
-}
-
-async function rejectRequest(req: Request, res: Response, next: NextFunction) {
-  try {
-    const approvalId = getSingleRouteId(req.params.id);
-    if (!approvalId) return res.status(400).json({ error: 'Invalid approval id' });
-    const approval = await loadPendingApproval(approvalId);
-    if (!approval) return res.status(404).json({ error: 'Pending approval not found' });
-    if (approvalTokenFromRequest(req) !== approval.approvalToken) return res.status(401).json({ error: 'Invalid approval token' });
-    const reason = typeof req.body === 'object' && req.body !== null && 'reason' in req.body ? String((req.body as { reason?: unknown }).reason ?? 'Rejected by operator') : 'Rejected by operator';
-    const updated = await prisma.approvalRequest.update({ where: { id: approval.id }, data: { status: 'rejected', rejectedAt: new Date(), rejectionReason: reason } });
-    logger.info('Approval rejected', { approvalId: approval.id });
-    return res.json({ ok: true, approval: updated });
-  } catch (error) { return next(error); }
-}
-
-approvalsRouter.get('/:id/approve', approveRequest);
-approvalsRouter.post('/:id/approve', approveRequest);
-approvalsRouter.get('/:id/reject', rejectRequest);
-approvalsRouter.post('/:id/reject', rejectRequest);
+export const approvalsRouter=createApprovalsRouter();

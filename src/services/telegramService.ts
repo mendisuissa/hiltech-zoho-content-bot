@@ -1,3 +1,4 @@
+import { holdHiltech } from './actionSecurity';
 import axios from 'axios';
 import OpenAI from 'openai';
 import type { ApprovalRequest, SourceItem } from '@prisma/client';
@@ -85,6 +86,7 @@ function getTelegramConfig() {
 }
 
 function telegramEndpoint(method: string): string {
+  holdHiltech();
   const { TELEGRAM_BOT_TOKEN } = getTelegramConfig();
   return `${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/${method}`;
 }
@@ -134,8 +136,7 @@ export async function sendTelegramTextMessage(text: string): Promise<void> {
 function _dashboardUrl(): string {
   // Dashboard lives on the ME app (KillWindowsApp-Mvp), not on the HilTech bot service
   const base = process.env.ME_APP_URL || 'https://killwindowsapp-mvp-production.up.railway.app';
-  const token = process.env.DASHBOARD_TOKEN || 'mendi-bridge-xK9mPqR7wZ2024';
-  return `${base}/dashboard/hiltech?token=${token}`;
+  return ''; // Legacy credential-bearing dashboard link disabled.
 }
 
 export async function sendTelegramMenuMessage(): Promise<void> {
@@ -408,6 +409,7 @@ export function isConfiguredApprovalChat(chatId: number | string | undefined): b
 }
 
 export async function sendApprovedContentPack(approval: ApprovalRequest): Promise<void> {
+  holdHiltech();
   const article = (approval.articleDraft ?? {}) as { title?: string; metaDescription?: string; excerpt?: string; bodyHtml?: string; sourceUrl?: string; editorNotes?: string };
   const facebookPage = (approval.facebookPageDraft ?? {}) as { postText?: string; cta?: string; sourceUrl?: string };
   const facebookGroup = (approval.facebookGroupDraft ?? {}) as { postText?: string; sourceUrl?: string };
@@ -465,6 +467,7 @@ export async function sendApprovedContentPack(approval: ApprovalRequest): Promis
 
 
 export async function generateAndSendCoverImage(approval: ApprovalRequest): Promise<void> {
+  holdHiltech();
   const cover = (approval.coverDraft ?? {}) as { prompt?: string; altText?: string };
   if (!cover.prompt) throw new Error('Cover prompt is unavailable for this approval');
   const { OPENAI_API_KEY } = requireEnv('OPENAI_API_KEY');

@@ -1,3 +1,4 @@
+import { holdHiltech } from './actionSecurity';
 import { prisma } from '../db/prisma';
 import { createEditorialBrief, normalizeEditorialBrief } from './editorialService';
 import { generateContentPack } from './contentGenerator';
@@ -7,6 +8,7 @@ import { assessContentQuality, buildRewriteInstructions, qualityScore } from './
  * Used after writing-rule changes; resend only replays old drafts and never regenerates them.
  */
 export async function regeneratePendingApproval(approvalId: string) {
+  holdHiltech();
   const approval = await prisma.approvalRequest.findFirst({
     where: { id: approvalId, status: 'pending' },
     include: { sourceItem: { include: { sourceConfig: true } } },

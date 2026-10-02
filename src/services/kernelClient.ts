@@ -1,38 +1,11 @@
-import axios from 'axios';
+import { holdHiltech } from './actionSecurity';
 
-type KernelResult = {
-  ok: boolean;
-  status: string;
-  output?: string;
-  message?: string;
-  orgId?: string;
-  capabilityId?: string;
-  provider?: string;
-  model?: string;
-  estimatedInputTokens?: number;
-};
+// Old free-text privileged forwarding has no delegated capability contract.
+export async function executeHiltechKernelTask(_text:string):Promise<any>{holdHiltech();}
 
-export async function executeHiltechKernelTask(text: string): Promise<KernelResult> {
-  const baseUrl = process.env.COMPANY_KERNEL_URL;
-  const secret = process.env.KERNEL_API_SECRET;
-
-  if (!baseUrl) throw new Error('COMPANY_KERNEL_URL is not configured');
-  if (!secret) throw new Error('KERNEL_API_SECRET is not configured');
-
-  const response = await axios.post(
-    `${baseUrl.replace(/\/$/, '')}/api/kernel/execute`,
-    {
-      text,
-      tenantId: 'hiltech',
-      sourceBot: 'hilabot'
-    },
-    {
-      headers: {
-        'x-kernel-secret': secret
-      },
-      timeout: 60000
-    }
-  );
-
-  return response.data as KernelResult;
+// Only trusted startup supplies this boundary. Callers receive an execution
+// handle, never kernel credentials or arbitrary text/capability forwarding.
+export function createScopedKernelClient(boundary:any) {
+  if(!boundary||typeof boundary.execute!=='function')throw Error('P0_KERNEL_SCOPE_REQUIRED');
+  return Object.freeze({execute:(req:any,request:any)=>boundary.execute(req,request)});
 }

@@ -1,3 +1,4 @@
+import { holdHiltech } from './actionSecurity';
 import axios from 'axios';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
@@ -17,6 +18,7 @@ export type FacebookPagePublishResult = {
 export async function publishFacebookPagePost(
   input: FacebookPagePublishInput,
 ): Promise<FacebookPagePublishResult> {
+  holdHiltech();
   if (!env.FACEBOOK_PAGE_PUBLISHING_ENABLED) {
     return {
       enabled: false,

@@ -1,3 +1,4 @@
+import { trustedTelegramIdentity, holdHiltech, heldResponse } from '../services/actionSecurity';
 import { Router, type Request, type Response } from 'express';
 import { prisma } from '../db/prisma';
 import { env } from '../config/env';
@@ -32,16 +33,14 @@ type TelegramUpdate = {
 
 export const telegramRouter = Router();
 
-function verifyTelegramWebhook(req: Request): boolean {
-  if (!env.TELEGRAM_WEBHOOK_SECRET) return true;
-  return req.header('x-telegram-bot-api-secret-token') === env.TELEGRAM_WEBHOOK_SECRET;
-}
+function verifyTelegramWebhook(req: Request): boolean { return trustedTelegramIdentity(req)!==null; }
 
 async function getPendingApproval(id: string) {
   return prisma.approvalRequest.findFirst({ where: { id, status: 'pending' } });
 }
 
 async function processTelegramMessage(update: TelegramUpdate): Promise<void> {
+  holdHiltech();
   const message = update.message;
   const text = message?.text?.trim();
 
@@ -94,6 +93,7 @@ async function processTelegramMessage(update: TelegramUpdate): Promise<void> {
 }
 
 async function processTelegramCallback(update: TelegramUpdate): Promise<void> {
+  holdHiltech();
   const callback = update.callback_query;
   if (!callback?.data || !callback.message) return;
 
@@ -303,6 +303,8 @@ telegramRouter.post('/webhook', (req: Request, res: Response) => {
   if (!verifyTelegramWebhook(req)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+
+  return heldResponse(res);
 
   res.sendStatus(200);
 

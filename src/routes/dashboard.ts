@@ -1,18 +1,11 @@
+import { requireCaller } from '../services/actionSecurity';
 import { Router } from 'express';
 import { prisma } from '../db/prisma';
 import { env } from '../config/env';
 
 export const dashboardRouter = Router();
 
-function auth(req: any, res: any): boolean {
-  const token = req.query.token || req.headers['x-dashboard-token'];
-  const expected = process.env.HILTECH_DASHBOARD_SECRET || process.env.SCAN_SECRET || '';
-  if (!expected || token !== expected) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return false;
-  }
-  return true;
-}
+const auth = requireCaller;
 
 // Graph stats — total items per product
 dashboardRouter.get('/graph', async (req, res, next) => {
